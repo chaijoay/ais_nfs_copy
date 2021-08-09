@@ -20,11 +20,14 @@
 ///     1.1.1       19-Sep-2019     add copy mode feature to enable 1 to 1 copying (keep the same name for input and output)
 ///     1.1.2       21-Nov-2019     fix state file checking and able to uncompress input file then concat output
 ///     1.1.3       21-Nov-2019     fix external decode/unzip file logic
+///     1.1.4       23-Jun-2021     add logic for retry copying and dedicated log of uncopy file
 ///
 ///
 #define _XOPEN_SOURCE           700         // Required under GLIBC for nftw()
 #define _POSIX_C_SOURCE         200809L
 #define _XOPEN_SOURCE_EXTENDED  1
+
+#define _USE_PCRE_
 
 #include <unistd.h>
 #include <sys/types.h>
@@ -35,7 +38,11 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <errno.h>
-#include <regex.h>
+#ifdef _USE_PCRE_
+    #include <pcre.h>
+#else
+    #include <regex.h>
+#endif
 #include <ftw.h>
 #include <time.h>
 
@@ -81,10 +88,17 @@ time_t gtOldFile;
 int gnNofOutDir;
 int gnSynCntAll;
 
-static regex_t gsRxLeafPat;
-static regex_t gsRxSynPat;
+#ifdef _USE_PCRE_
+    static pcre *gsRxLeafPat;
+    static pcre *gsRxSynPat;
+#else
+    static regex_t gsRxLeafPat;
+    static regex_t gsRxSynPat;
+#endif
+
 FILE   *gfpSnap;
 FILE   *gfpState;
+FILE   *gfpFail;
 FILE   *gfpMerge;
 int    gnRootDirLen;
 int    gnCmdArg = E_NORMAL;
@@ -159,7 +173,10 @@ const char gszIniStrCommon[E_NOF_PAR_COMMON][SIZE_ITEM_T] = {
     "SKIP_OLD_FILE",
     "NO_SYN_ALERT_HOUR",
     "ALERT_LOG_DIR",
-    "MERGE_LOG_DIR"
+    "MERGE_LOG_DIR",
+    "RETRY_COPY_ATTEMPT",
+    "RETRY_COPY_WAIT_SEC",
+    "RETRY_COPY_FAIL_DIR"
 };
 
 const char gszIniStrSubOutput[E_NOF_PAR_SUBOUT][SIZE_ITEM_T] = {
@@ -190,6 +207,7 @@ int main(int argc, char *argv[])
     gtTimeCapValSyn = 0L;
     gfpState = NULL;
     gfpMerge = NULL;
+    gfpFail = NULL;
 
     // 1. read ini file
     if ( readConfig(argc, argv) != SUCCESS ) {
@@ -316,6 +334,10 @@ int main(int argc, char *argv[])
                 fclose(gfpMerge);
                 gfpMerge = NULL;
             }
+            if ( gfpFail != NULL ) {
+                fclose(gfpFail);
+                gfpFail = NULL;
+            }
             writeLog(LOG_INF, "total processed files for today in=%d out=%d", gnInpFileCntDay, gnOutFileCntDay);
             strcpy(gszToday, getSysDTM(DTM_DATE_ONLY));
             gnInpFileCntDay = 0;
@@ -344,6 +366,10 @@ int main(int argc, char *argv[])
         fclose(gfpMerge);
         gfpMerge = NULL;
     }
+    if ( gfpFail != NULL ) {
+        fclose(gfpFail);
+        gfpFail = NULL;
+    }
     procLock(gszAppName, E_CLR);
     writeLog(LOG_INF, "%s", getSigInfoStr());
     writeLog(LOG_INF, "------- %s %s process completely stop -------", _APP_NAME_, gszPrcType);
@@ -353,6 +379,77 @@ int main(int argc, char *argv[])
 
 }
 
+#ifdef _USE_PCRE_
+int buildSnapFile(const char *snapfile)
+{
+    char cmd[SIZE_BUFF];
+    const char *error;
+    int erroffset;
+    //int rc, ovector[SIZE_ITEM_L];
+    gnSynCntAll = 0;
+    gnRootDirLen = strlen(gszIniParInput[E_ROOT_DIRSYN]);
+
+    // compile regular expression for leaf node directory
+    if ( (gsRxLeafPat = pcre_compile(gszIniParInput[E_LEAF_DIRSYN], 0, &error, &erroffset, NULL)) == NULL ) {
+        writeLog(LOG_ERR, "%s: invalid regular expression, failed at offset %d: %s", gszIniParInput[E_LEAF_DIRSYN], erroffset, error);
+        return FAILED;
+    }
+
+    // compile regular expression for sync file name
+    if ( (gsRxSynPat = pcre_compile(gszIniParInput[E_SYN_FN_PAT], 0, &error, &erroffset, NULL)) == NULL ) {
+        writeLog(LOG_ERR, "%s: invalid regular expression, failed at offset %d: %s", gszIniParInput[E_SYN_FN_PAT], erroffset, error);
+        free(gsRxLeafPat);
+        return FAILED;
+    }
+
+    // open first snap file for writing
+    if ( (gfpSnap = fopen(snapfile, "w")) == NULL ) {
+        writeLog(LOG_SYS, "unable to open %s for writing: %s\n", snapfile, strerror(errno));
+        free(gsRxLeafPat);
+        free(gsRxSynPat);
+        return FAILED;
+    }
+
+    // recursively walk through directories and file and check matching
+    // filename, leaf node directory name regarding compiled regex in _chkSynFile func
+    writeLog(LOG_INF, "scaning sync file in directory %s", gszIniParInput[E_ROOT_DIRSYN]);
+    if ( nftw(gszIniParInput[E_ROOT_DIRSYN], _chkSynFile, 32, FTW_DEPTH) ) {
+        writeLog(LOG_SYS, "unable to read path %s: %s\n", gszIniParInput[E_ROOT_DIRSYN], strerror(errno));
+        free(gsRxLeafPat);
+        free(gsRxSynPat);
+        fclose(gfpSnap);
+        gfpSnap = NULL;
+        return FAILED;
+    }
+
+    free(gsRxLeafPat);
+    free(gsRxSynPat);
+    fclose(gfpSnap);
+    gfpSnap = NULL;
+
+    // if there are sync files then sort the snap file
+    if ( gnSynCntAll > 0 ) {
+        memset(cmd, 0x00, sizeof(cmd));
+        sprintf(cmd, "sort -T %s %s > %s.tmp 2>/dev/null", gszIniParCommon[E_TMP_DIR], snapfile, snapfile);
+writeLog(LOG_DB3, "buildSnapFile cmd '%s'", cmd);
+        if ( system(cmd) != SUCCESS ) {
+            writeLog(LOG_SYS, "cannot sort file %s (%s)", snapfile, strerror(errno));
+            sprintf(cmd, "rm -f %s %s.tmp", snapfile, snapfile);
+            system(cmd);
+            return FAILED;
+        }
+        sprintf(cmd, "mv %s.tmp %s 2>/dev/null", snapfile, snapfile);
+writeLog(LOG_DB3, "buildSnapFile cmd '%s'", cmd);
+        system(cmd);
+    }
+    else {
+        writeLog(LOG_INF, "no sync file (first state)");
+    }
+
+    return SUCCESS;
+
+}
+#else
 int buildSnapFile(const char *snapfile)
 {
     char cmd[SIZE_BUFF];
@@ -419,6 +516,7 @@ writeLog(LOG_DB3, "buildSnapFile cmd '%s'", cmd);
     return SUCCESS;
 
 }
+#endif
 
 int _chkSynFile(const char *fpath, const struct stat *info, int typeflag, struct FTW *ftwbuf)
 {
@@ -452,13 +550,20 @@ int _chkSynFile(const char *fpath, const struct stat *info, int typeflag, struct
     }
 
 writeLog(LOG_DB3, "_chkSynFile leafdir(%s), file(%s)", leafdir, fname);
+#ifdef _USE_PCRE_
+    int ovector[SIZE_ITEM_L];
+    if ( pcre_exec(gsRxLeafPat, NULL, leafdir, strlen(leafdir), 0, 0, ovector, SIZE_ITEM_L) < 0 )
+        return 0;   // skip when leaf node is not matched
 
+    if ( pcre_exec(gsRxSynPat, NULL, fname, strlen(fname), 0, 0, ovector, SIZE_ITEM_L) < 0 )
+        return 0;   // skip when file name is not matched
+#else
     if ( regexec(&gsRxLeafPat, leafdir, 0, NULL, 0) )
         return 0;   // skip when leaf node is not matched
 
     if ( regexec(&gsRxSynPat, fname, 0, NULL, 0) )
         return 0;   // skip when file name is not matched
-
+#endif
     if ( !(info->st_mode & (S_IRUSR|S_IRGRP|S_IROTH)) ) {
         writeLog(LOG_WRN, "no read permission for %s skipped", fname);
         return 0;
@@ -474,6 +579,7 @@ writeLog(LOG_DB2, "_chkSynFile pattern matched, check old file: file/conf %ld/%l
     return 0;
 
 }
+
 
 int chkSnapVsState(const char *isnap, const char *osnap)
 {
@@ -848,6 +954,7 @@ writeLog(LOG_DB3, "wrtOutput ori_syn '%s'", ori_syn);
                 sprintf(err_syn, "%s.ERR", ori_syn);
                 if ( rename(ori_syn, err_syn) != SUCCESS ) {
                     writeLog(LOG_WRN, "cannot rename %s to ERR (%s)", ori_syn, strerror(errno));
+                    logFail(snp_inf[E_LEAF_SYN], snp_inf[E_SYN_FILE]);
                 }
                 logState(snp_inf[E_LEAF_SYN], snp_inf[E_SYN_FILE]);
                 continue;
@@ -896,6 +1003,7 @@ writeLog(LOG_DBG, "wrtOutput reading %s to %s", full_inp_datfile, cat_file);
 
             if ( extDecoder(full_inp_datfile, full_inp_decoded) != SUCCESS ) {
                 logState(snp_inf[E_LEAF_SYN], snp_inf[E_SYN_FILE]);
+                logFail(snp_inf[E_LEAF_SYN], snp_inf[E_SYN_FILE]);
                 continue;
             }
 
@@ -1126,6 +1234,7 @@ writeLog(LOG_DB3, "one2oneCopy ori_dat '%s'", ori_dat);
                 sprintf(err_syn, "%s.ERR", ori_syn);
                 if ( rename(ori_syn, err_syn) != SUCCESS ) {
                     writeLog(LOG_WRN, "cannot rename %s to ERR (%s)", ori_syn, strerror(errno));
+                    logFail(snp_inf[E_LEAF_SYN], snp_inf[E_SYN_FILE]);
                 }
                 logState(snp_inf[E_LEAF_SYN], snp_inf[E_SYN_FILE]);
                 continue;
@@ -1159,18 +1268,21 @@ writeLog(LOG_DB3, "one2oneCopy cmd '%s'", cmd);
 
                 sprintf(dest_dat, "%s/%s/%s", gszIniSubParItem[i][E_ROOT_DIRDAT_], datleaf, snp_inf[E_DAT_FILE]);
 writeLog(LOG_DB3, "one2oneCopy dest_dat %s", dest_dat);
-                retry = 3;
+                retry = atoi(gszIniParCommon[E_RETRY_COPY_ATTEMPT]);
+
+                char err_str[SIZE_ITEM_S];
                 do {
                     memset(ocksum2, 0x00, sizeof(ocksum2));
 
                     system(cmd);
+                    strcpy(err_str, strerror(errno));
 
                     getCksumStr(dest_dat, ocksum2, sizeof(ocksum2));
                     trimStr(ocksum2);
 
                     if ( strcmp(ocksum1, ocksum2) != 0 ) {
                         retry--;
-                        sleep(1);
+                        sleep(atoi(gszIniParCommon[E_RETRY_COPY_WAIT_SEC]));
                     }
                     else {
                         chmod(dest_dat, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
@@ -1178,7 +1290,9 @@ writeLog(LOG_DB3, "one2oneCopy dest_dat %s", dest_dat);
                     }
                 } while ( retry > 0 );
                 if ( retry <= 0 ) {
-                    writeLog(LOG_ERR, "copy file %s failed after a few tries", snp_inf[E_DAT_FILE]);
+                    writeLog(LOG_ERR, "copy file %s failed after %s tries (%s)", snp_inf[E_DAT_FILE], gszIniParCommon[E_RETRY_COPY_ATTEMPT], err_str);
+                    logState(snp_inf[E_LEAF_SYN], snp_inf[E_SYN_FILE]);
+                    logFail(snp_inf[E_LEAF_SYN], snp_inf[E_SYN_FILE]);
                     continue;
                 }
 
@@ -1419,6 +1533,21 @@ int logState(const char *leaf_dir, const char *file_name)
     }
     result = fprintf(gfpState, "%s|%s\n", leaf_dir, file_name);
     fflush(gfpState);
+
+    return result;
+}
+
+int logFail(const char *leaf_dir, const char *file_name)
+{
+    int result = 0;
+    if ( gfpFail == NULL ) {
+        char fail_file[SIZE_ITEM_L];
+        memset(fail_file, 0x00, sizeof(fail_file));
+        sprintf(fail_file, "%s/%s_%s%s", gszIniParCommon[E_RETRY_COPY_FAIL_DIR], gszAppName, gszToday, RETRY_SUFF);
+        gfpFail = fopen(fail_file, "a");
+    }
+    result = fprintf(gfpFail, "%s|%s\n", leaf_dir, file_name);
+    fflush(gfpFail);
 
     return result;
 }
@@ -1804,6 +1933,20 @@ int validateIni()
             fprintf(stderr, "unable to access %s %s (%s)\n", gszIniStrCommon[E_ALERT_LOG_DIR], gszIniParCommon[E_ALERT_LOG_DIR], strerror(errno));
         }
     }
+    if ( gszIniParCommon[E_RETRY_COPY_FAIL_DIR][0] != '\0' ) {
+        if ( access(gszIniParCommon[E_RETRY_COPY_FAIL_DIR], F_OK) != SUCCESS ) {
+            result = FAILED;
+            fprintf(stderr, "unable to access %s %s (%s)\n", gszIniStrCommon[E_RETRY_COPY_FAIL_DIR], gszIniParCommon[E_RETRY_COPY_FAIL_DIR], strerror(errno));
+        }
+    }
+    if ( atoi(gszIniParCommon[E_RETRY_COPY_ATTEMPT]) <= 0 ) {
+        result = FAILED;
+        fprintf(stderr, "%s must be > 0 (%s)\n", gszIniStrCommon[E_RETRY_COPY_ATTEMPT], gszIniParCommon[E_RETRY_COPY_ATTEMPT]);
+    }
+    if ( atoi(gszIniParCommon[E_RETRY_COPY_WAIT_SEC]) <= 0 ) {
+        result = FAILED;
+        fprintf(stderr, "%s must be > 0 (%s)\n", gszIniStrCommon[E_RETRY_COPY_WAIT_SEC], gszIniParCommon[E_RETRY_COPY_WAIT_SEC]);
+    }
 
     return result;
 
@@ -1957,9 +2100,23 @@ int extDecoder(const char *full_fname, char *full_decoded)
 {
     char cmd[SIZE_BUFF];
     struct stat st;
+    char err_str[SIZE_ITEM_S];
+    
+    int retry = atoi(gszIniParCommon[E_RETRY_COPY_ATTEMPT]);
+    do {
+        if ( access(full_fname, F_OK|R_OK) != SUCCESS ) {
+            strcpy(err_str, strerror(errno));
+            retry--;
+            sleep(atoi(gszIniParCommon[E_RETRY_COPY_WAIT_SEC]));
+        }
+        else {
+            retry = 1;
+            break;
+        }
+    } while ( retry > 0 );
 
-    if ( access(full_fname, F_OK|R_OK) != SUCCESS ) {
-        writeLog(LOG_SYS, "unable to access file '%s': %s", full_fname, strerror(errno));
+    if ( retry <= 0 ) {
+        writeLog(LOG_ERR, "copy file %s failed after %s tries (%s)", full_fname, gszIniParCommon[E_RETRY_COPY_ATTEMPT], err_str);
         return FAILED;
     }
     else {

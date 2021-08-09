@@ -20,6 +20,7 @@
 ///     1.1.1       19-Sep-2019     add copy mode feature to enable 1 to 1 copying (keep the same name for input and output)
 ///     1.1.2       21-Nov-2019     fix state file checking and able to uncompress input file then concat output
 ///     1.1.3       21-Nov-2019     fix external decode/unzip file logic
+///     1.1.4       23-Jun-2021     add logic for retry copying and dedicated log of uncopy file
 ///
 ///
 
@@ -34,11 +35,12 @@
 #include "nfs_ini_def.h"
 
 #define _APP_NAME_              "nfs_copy"
-#define _APP_VERS_              "1.1.2"
+#define _APP_VERS_              "1.1.4"
 
 #define STATE_SUFF              ".proclist"
 #define ALERT_SUFF              ".alrt"
 #define MERGE_SUFF              ".mergelist"
+#define RETRY_SUFF              ".copy_failed"
 
 #define     MAX_RUNNING_SEQ     1000
 #define     OUT_DATA_EXT        ".dat"
@@ -82,6 +84,7 @@ void    prepLeafDir(const char *orig, char snp[][SIZE_ITEM_L], const char *yyyym
 void    doBackup(char snp[][SIZE_ITEM_L]);
 int     mapNetType(char *nettype, char *cdrfeedtype);
 int     logState(const char *leaf_dir, const char *file_name);
+int     logFail(const char *leaf_dir, const char *file_name);
 int     logMergeList(const char *oper, const char *file_name);
 void    clearOldState();
 

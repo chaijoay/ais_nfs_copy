@@ -20,7 +20,7 @@ echo "${CC} ${CFLAGS} -o ${OBJ_DIR}/minIni.o    -c ${LIB_DIR}/minIni.c    ${INCL
       ${CC} ${CFLAGS} -o ${OBJ_DIR}/minIni.o    -c ${LIB_DIR}/minIni.c    ${INCLUDES}
 echo "${CC} ${CFLAGS} -o ${OBJ_DIR}/nfs_copy.o  -c ./nfs_copy.c           ${INCLUDES}"
       ${CC} ${CFLAGS} -o ${OBJ_DIR}/nfs_copy.o  -c ./nfs_copy.c           ${INCLUDES}
-echo "${CC} ${CFLAGS} -o ${BIN_DIR}/nfs_copy.exe ${OBJ_DIR}/minIni.o ${OBJ_DIR}/strlogutl.o ${OBJ_DIR}/procsig.o ${OBJ_DIR}/nfs_copy.o -lm"
-      ${CC} ${CFLAGS} -o ${BIN_DIR}/nfs_copy.exe ${OBJ_DIR}/minIni.o ${OBJ_DIR}/strlogutl.o ${OBJ_DIR}/procsig.o ${OBJ_DIR}/nfs_copy.o -lm
+echo "${CC} ${CFLAGS} -o ${BIN_DIR}/nfs_copy.exe ${OBJ_DIR}/minIni.o ${OBJ_DIR}/strlogutl.o ${OBJ_DIR}/procsig.o ${OBJ_DIR}/nfs_copy.o -lm -lpcre"
+      ${CC} ${CFLAGS} -o ${BIN_DIR}/nfs_copy.exe ${OBJ_DIR}/minIni.o ${OBJ_DIR}/strlogutl.o ${OBJ_DIR}/procsig.o ${OBJ_DIR}/nfs_copy.o -lm -lpcre
 echo "rm -f ${OBJ_DIR}/strlogutl.o ${OBJ_DIR}/minIni.o ${OBJ_DIR}/nfs_copy.o ${OBJ_DIR}/procsig.o"
       rm -f ${OBJ_DIR}/strlogutl.o ${OBJ_DIR}/minIni.o ${OBJ_DIR}/nfs_copy.o ${OBJ_DIR}/procsig.o
