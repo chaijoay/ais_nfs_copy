@@ -19,6 +19,7 @@
 ///     1.1.0       17-Sep-2019     flushes logState and not backup sync in case of self sync
 ///     1.1.1       19-Sep-2019     add copy mode feature to enable 1 to 1 copying (keep the same name for input and output)
 ///     1.1.2       21-Nov-2019     fix state file checking and able to uncompress input file then concat output
+///     1.1.3       21-Nov-2019     fix external decode/unzip file logic
 ///
 ///
 

@@ -19,6 +19,7 @@
 ///     1.1.0       17-Sep-2019     flushes logState and not backup sync in case of self sync
 ///     1.1.1       19-Sep-2019     add copy mode feature to enable 1 to 1 copying (keep the same name for input and output)
 ///     1.1.2       21-Nov-2019     fix state file checking and able to uncompress input file then concat output
+///     1.1.3       21-Nov-2019     fix external decode/unzip file logic
 ///
 ///
 #define _XOPEN_SOURCE           700         // Required under GLIBC for nftw()
@@ -224,7 +225,7 @@ int main(int argc, char *argv[])
     while ( TRUE ) {
 
         procLock(gszAppName, E_SET);
-        
+
         if ( isTerminated() == TRUE ) {
             break;
         }
@@ -330,8 +331,9 @@ int main(int argc, char *argv[])
             writeLog(LOG_INF, "sleep %s sec", gszIniParCommon[E_SLEEP_SEC]);
             sleep(atoi(gszIniParCommon[E_SLEEP_SEC]));
         }
-
-        chkAlertNoSync();
+        if ( gszIniParCommon[E_ALERT_LOG_DIR][0] != '\0' ) {
+            chkAlertNoSync();
+        }
 
     }
     if ( gfpState != NULL ) {
@@ -424,15 +426,30 @@ int _chkSynFile(const char *fpath, const struct stat *info, int typeflag, struct
     const char *fname = fpath + ftwbuf->base;
     char leafdir[SIZE_ITEM_L];
     time_t systime;
+    int  len2get = 0;
 
     if ( typeflag != FTW_F && typeflag != FTW_SL && typeflag != FTW_SLN )
         return 0;
 
     memset(leafdir, 0x00, SIZE_ITEM_L);
-    if ( gnRootDirLen == 1 )    // in case root dir is only / (single slash)
-        strncpy(leafdir, fpath+gnRootDirLen, (ftwbuf->base - gnRootDirLen));
-    else
-        strncpy(leafdir, fpath+gnRootDirLen+1, (ftwbuf->base - gnRootDirLen - 2));  // remove first and last slash eg. /root/l1/l2/file.syn -> l1/l2
+    if ( gnRootDirLen == 1 ) {    // in case root dir is only / (single slash)
+        if ( (len2get = (ftwbuf->base - gnRootDirLen)) > 0 ) {
+            strncpy(leafdir, fpath+gnRootDirLen, len2get);
+        }
+        else {
+            writeLog(LOG_WRN, "unable to get leafdir(%s), cannot get length(%d)", fpath, len2get);
+            return 0;
+        }
+    }
+    else {
+        if ( (len2get = (ftwbuf->base - gnRootDirLen - 2)) > 0 ) {
+            strncpy(leafdir, fpath+gnRootDirLen+1, len2get);  // remove first and last slash eg. /root/l1/l2/file.syn -> l1/l2
+        }
+        else {
+            writeLog(LOG_WRN, "unable to get leafdir(%s), cannot get length(%d)", fpath, len2get);
+            return 0;
+        }
+    }
 
 writeLog(LOG_DB3, "_chkSynFile leafdir(%s), file(%s)", leafdir, fname);
 
@@ -736,6 +753,11 @@ int isSynStable(const char *fname, int stable_sec, char *mod_ymd, unsigned long 
     unsigned long size = 0;
     int result = FALSE;
 
+    if ( access(fname, F_OK|R_OK) != SUCCESS ) {
+        fprintf(stderr, "unable to access file %s (%s)\n", fname, strerror(errno));
+        return result;
+    }
+
     strcpy(mod_ymd, getFileTimeM(fname, "%Y%m%d%H%M%S"));
     memset(&stat_buf, 0x00, sizeof(stat_buf));
     if ( !lstat(fname, &stat_buf) ) {
@@ -768,8 +790,10 @@ writeLog(LOG_DB3, "isSynStable %s (file/conf %ld/%d sec) size %ld byte %s", fnam
 //
 int wrtOutput(const char *snapfile)
 {
-    char snp_line[SIZE_BUFF];
+    //char snp_line[SIZE_BUFF], snp_line_prv[SIZE_BUFF], snp_line_tmp[SIZE_BUFF];
+    char snp_line[SIZE_BUFF], snp_line_prv[SIZE_BUFF];
     char snp_inf[NOF_VSNAP][SIZE_ITEM_L];
+    char snp_inf_prv[NOF_VSNAP][SIZE_ITEM_L];
     char full_inp_datfile[SIZE_ITEM_L];
     char full_inp_decoded[SIZE_ITEM_L];
     char dat_line[SIZE_BUFF];
@@ -793,6 +817,8 @@ int wrtOutput(const char *snapfile)
     else {
         memset(curr_node, 0x00, sizeof(curr_node));
         memset(prev_node, 0x00, sizeof(prev_node));
+        memset(snp_line_prv, 0x00, sizeof(snp_line_prv));
+        //memset(snp_line_tmp, 0x00, sizeof(snp_line_tmp));
         gnInpFileCntBat = 0;
         gnOutFileCntBat = 0;
 
@@ -805,6 +831,8 @@ int wrtOutput(const char *snapfile)
 
 writeLog(LOG_DB3, "wrtOutput snp_line %s", snp_line);
 
+            //strcpy(snp_line_tmp, snp_line);
+            strcpy(snp_line_prv, snp_line);
             getStrToken(snp_inf, NOF_VSNAP, snp_line, "|");
 
 writeLog(LOG_DB3, "wrtOutput snp_inf %s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
@@ -836,7 +864,7 @@ writeLog(LOG_DB3, "wrtOutput curr_node(%s) prev_node(%s) glByteCnt/MAX_SIZE(%ld/
                     wfp = NULL;
                 }
                 if ( prev_node[0] != '\0' ) {
-                    relocDataAndGenSync(full_tmp_catfile, tmp_synfile, snp_inf, NOF_VSNAP);
+                    relocDataAndGenSync(full_tmp_catfile, tmp_synfile, snp_inf_prv, NOF_VSNAP);
                 }
                 memset(datetime, 0x00, sizeof(datetime));
                 memset(full_tmp_catfile, 0x00, sizeof(full_tmp_catfile));
@@ -853,6 +881,9 @@ writeLog(LOG_DB3, "wrtOutput curr_node(%s) prev_node(%s) glByteCnt/MAX_SIZE(%ld/
                 sprintf(full_tmp_catfile, "%s/%s", gszIniParCommon[E_TMP_DIR], cat_file);
 writeLog(LOG_DB3, "wrtOutput tmp_synfile(%s) cat_file(%s) full_tmp_catfile(%s)", tmp_synfile, cat_file, full_tmp_catfile);
                 strcpy(prev_node, curr_node);
+                //strcpy(snp_line_prv, snp_line_tmp);
+                memset(snp_inf_prv, 0x00, sizeof(snp_inf_prv));
+                getStrToken(snp_inf_prv, NOF_VSNAP, snp_line_prv, "|");
                 glByteCnt = 0;
                 gnWrtRecCnt = 0;
 
@@ -910,7 +941,7 @@ writeLog(LOG_DBG, "wrtOutput reading %s to %s", full_inp_datfile, cat_file);
 
                 writeLog(LOG_INF, "read %s mtime=%s rec=%ld to %s", snp_inf[E_DAT_FILE], snp_inf[E_YMD14], rdrec_cnt, cat_file);
                 sprintf(gszAlertStr2, "%s|%s|%ld", snp_inf[E_YMD14], snp_inf[E_DAT_FILE], rdrec_cnt);
-                
+
                 chkToDelete(full_inp_decoded, full_inp_datfile);
                 gnWrtRecCnt += rdrec_cnt;
                 gnInpFileCntBat++;
@@ -987,10 +1018,10 @@ writeLog(LOG_DB3, "relocDataAndGenSync sync_content '%s'", sync_content);
         sprintf(cmd, "mkdir -p %s/%s 2>/dev/null", gszIniSubParItem[i][E_ROOT_DIRDAT_], datleaf);
 writeLog(LOG_DB3, "relocDataAndGenSync cmd '%s'", cmd);
         system(cmd);
-        
-        sprintf(cmd, "chmod 755 %s/%s", gszIniSubParItem[i][E_ROOT_DIRDAT_], datleaf);
+
+        sprintf(cmd, "chmod 775 %s/%s", gszIniSubParItem[i][E_ROOT_DIRDAT_], datleaf);
         system(cmd);
-        
+
         sprintf(cmd, "cp -p %s %s/%s 2>/dev/null", full_catfile, gszIniSubParItem[i][E_ROOT_DIRDAT_], datleaf);
 writeLog(LOG_DB3, "relocDataAndGenSync cmd '%s'", cmd);
         system(cmd);
@@ -1000,7 +1031,7 @@ writeLog(LOG_DB3, "relocDataAndGenSync cmd '%s'", cmd);
         sprintf(dat, "%s/%s/%s", gszIniSubParItem[i][E_ROOT_DIRDAT_], datleaf, datfile);
         chmod(dat, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
 writeLog(LOG_DB3, "relocDataAndGenSync out dat '%s'", dat);
-        
+
         if ( gszIniSubParItem[i][E_CREATE_SYN_][0] == 'Y' ) {
             char syn[SIZE_ITEM_L];
             FILE *sfp = NULL;
@@ -1013,8 +1044,8 @@ writeLog(LOG_DB3, "relocDataAndGenSync prepLeafDir Syn '%s' -> '%s'", gszIniSubP
             sprintf(cmd, "mkdir -p %s/%s 2>/dev/null", gszIniSubParItem[i][E_ROOT_DIRSYN_], synleaf);
 writeLog(LOG_DB3, "relocDataAndGenSync cmd '%s'", cmd);
             system(cmd);
-            
-            sprintf(cmd, "chmod 755 %s/%s", gszIniSubParItem[i][E_ROOT_DIRSYN_], synleaf);
+
+            sprintf(cmd, "chmod 775 %s/%s", gszIniSubParItem[i][E_ROOT_DIRSYN_], synleaf);
             system(cmd);
 
             sprintf(syn, "%s/%s/%s", gszIniSubParItem[i][E_ROOT_DIRSYN_], synleaf, synfile);
@@ -1067,7 +1098,7 @@ int one2oneCopy(const char *snapfile)
         gnOutFileCntBat = 0;
 
         while ( fgets(snp_line, sizeof(snp_line), ifp) ) {
-            
+
             memset(ori_syn, 0x00, sizeof(ori_syn));
             memset(ori_dat, 0x00, sizeof(ori_dat));
             memset(snp_inf, 0x00, sizeof(snp_inf));
@@ -1100,10 +1131,10 @@ writeLog(LOG_DB3, "one2oneCopy ori_dat '%s'", ori_dat);
                 continue;
             }
             writeLog(LOG_INF, "file %s ok", ori_syn);
-            
+
             getCksumStr(ori_dat, ocksum1, sizeof(ocksum1));
             trimStr(ocksum1);
-            
+
             // start copy file from source to (multi) destination
             int i;
             for ( i = 0; i < gnNofOutDir; i++ ) {   // loop through total number of output directory
@@ -1115,14 +1146,14 @@ writeLog(LOG_DB3, "one2oneCopy ori_dat '%s'", ori_dat);
                     prepLeafDir(gszIniSubParItem[i][E_LEAF_DIRDAT_], snp_inf, datetime, datleaf);
 writeLog(LOG_DB3, "one2oneCopy prepLeafDir Dat '%s' -> '%s'", gszIniSubParItem[i][E_LEAF_DIRDAT_], datleaf);
                 }
-                
+
                 sprintf(cmd, "mkdir -p %s/%s 2>/dev/null", gszIniSubParItem[i][E_ROOT_DIRDAT_], datleaf);
 writeLog(LOG_DB3, "one2oneCopy cmd '%s'", cmd);
                 system(cmd);
-                
-                sprintf(cmd, "chmod 755 %s/%s", gszIniSubParItem[i][E_ROOT_DIRDAT_], datleaf);
+
+                sprintf(cmd, "chmod 775 %s/%s", gszIniSubParItem[i][E_ROOT_DIRDAT_], datleaf);
                 system(cmd);
-                
+
                 sprintf(cmd, "cp -p %s %s/%s 2>/dev/null", ori_dat, gszIniSubParItem[i][E_ROOT_DIRDAT_], datleaf);
 writeLog(LOG_DB3, "one2oneCopy cmd '%s'", cmd);
 
@@ -1131,9 +1162,9 @@ writeLog(LOG_DB3, "one2oneCopy dest_dat %s", dest_dat);
                 retry = 3;
                 do {
                     memset(ocksum2, 0x00, sizeof(ocksum2));
-            
+
                     system(cmd);
-                    
+
                     getCksumStr(dest_dat, ocksum2, sizeof(ocksum2));
                     trimStr(ocksum2);
 
@@ -1150,12 +1181,12 @@ writeLog(LOG_DB3, "one2oneCopy dest_dat %s", dest_dat);
                     writeLog(LOG_ERR, "copy file %s failed after a few tries", snp_inf[E_DAT_FILE]);
                     continue;
                 }
-                
+
                 if ( gszIniSubParItem[i][E_CREATE_SYN_][0] == 'Y' && strcmp(gszIniParInput[E_SRC_TYPE], _SELF_) != 0 ) {
-                    
+
                     memset(synleaf, 0x00, sizeof(synleaf));
                     memset(dest_syn, 0x00, sizeof(dest_syn));
-                    
+
                     if ( gszIniSubParItem[i][E_LEAF_DIRSYN_][0] != '\0' ) {
                         prepLeafDir(gszIniSubParItem[i][E_LEAF_DIRSYN_], snp_inf, datetime, synleaf);
 writeLog(LOG_DB3, "one2oneCopy prepLeafDir Syn '%s' -> '%s'", gszIniSubParItem[i][E_LEAF_DIRSYN_], synleaf);
@@ -1164,10 +1195,10 @@ writeLog(LOG_DB3, "one2oneCopy prepLeafDir Syn '%s' -> '%s'", gszIniSubParItem[i
                     sprintf(cmd, "mkdir -p %s/%s 2>/dev/null", gszIniSubParItem[i][E_ROOT_DIRSYN_], synleaf);
 writeLog(LOG_DB3, "one2oneCopy cmd '%s'", cmd);
                     system(cmd);
-                    
-                    sprintf(cmd, "chmod 755 %s/%s", gszIniSubParItem[i][E_ROOT_DIRSYN_], synleaf);
+
+                    sprintf(cmd, "chmod 775 %s/%s", gszIniSubParItem[i][E_ROOT_DIRSYN_], synleaf);
                     system(cmd);
-                    
+
                     sprintf(cmd, "cp -p %s %s/%s 2>/dev/null", ori_syn, gszIniSubParItem[i][E_ROOT_DIRSYN_], synleaf);
                     sprintf(dest_syn, "%s/%s/%s", gszIniSubParItem[i][E_ROOT_DIRSYN_], synleaf, snp_inf[E_SYN_FILE]);
                     chmod(dest_syn, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
@@ -1189,7 +1220,7 @@ writeLog(LOG_DB3, "one2oneCopy cmd '%s'", cmd);
         writeLog(LOG_INF, "total processed files for this round in=%d out=%d", gnInpFileCntBat, gnOutFileCntBat);
         gtLastProcTimeT = time(NULL);   // reset last process time;
     }
-    
+
     return SUCCESS;
 
 }
@@ -1263,29 +1294,29 @@ writeLog(LOG_DB3, "doBackup fdata(%s) fsync(%s)", fdata, fsync);
         sprintf(cmd, "mkdir -p %s/%s 2>/dev/null", gszIniParBackup[E_BACKUP_DIRDAT], datleaf);
 writeLog(LOG_DB3, "doBackup cmd '%s'", cmd);
         system(cmd);
-        
-        sprintf(cmd, "chmod 755 %s/%s", gszIniParBackup[E_BACKUP_DIRDAT], datleaf);
+
+        sprintf(cmd, "chmod 775 %s/%s", gszIniParBackup[E_BACKUP_DIRDAT], datleaf);
         system(cmd);
-        
+
         memset(ocksum1, 0x00, sizeof(ocksum1));
         memset(ofdata, 0x00, sizeof(ofdata));
-        
+
         getCksumStr(fdata, ocksum1, sizeof(ocksum1));
         trimStr(ocksum1);
-        
+
         sprintf(cmd, "cp %s %s/%s", fdata, gszIniParBackup[E_BACKUP_DIRDAT], datleaf);
         sprintf(ofdata, "%s/%s/%s", gszIniParBackup[E_BACKUP_DIRDAT], datleaf, snp[E_DAT_FILE]);
-        
+
         do {    // loop for retry backup
 
 writeLog(LOG_DB3, "doBackup cmd '%s'", cmd);
             memset(ocksum2, 0x00, sizeof(ocksum2));
-            
+
             system(cmd);
-            
+
             getCksumStr(ofdata, ocksum2, sizeof(ocksum2));
             trimStr(ocksum2);
-            
+
 writeLog(LOG_DB3, "doBackup compare ckusm src/dst (%s/%s)", ocksum1, ocksum2);
             if ( strcmp(ocksum1, ocksum2) != 0 ) {
                 retry--;
@@ -1308,10 +1339,10 @@ writeLog(LOG_DB3, "doBackup compare ckusm src/dst (%s/%s)", ocksum1, ocksum2);
         sprintf(cmd, "mkdir -p %s/%s 2>/dev/null", gszIniParBackup[E_BACKUP_DIRSYN], synleaf);
 writeLog(LOG_DB3, "doBackup cmd '%s'", cmd);
         system(cmd);
-        
-        sprintf(cmd, "chmod 755 %s/%s", gszIniParBackup[E_BACKUP_DIRSYN], synleaf);
+
+        sprintf(cmd, "chmod 775 %s/%s", gszIniParBackup[E_BACKUP_DIRSYN], synleaf);
         system(cmd);
-        
+
         sprintf(cmd, "cp %s %s/%s", fsync, gszIniParBackup[E_BACKUP_DIRSYN], synleaf);
 writeLog(LOG_DB3, "doBackup cmd '%s'", cmd);
         system(cmd);
@@ -1888,17 +1919,26 @@ writeLog(LOG_DB2, "sys(%ld) 1st(%ld) new(%ld) val(%ld) alrt_sec(%d)", systime, g
             FILE *f = NULL;
             memset(gszAlertFname1, 0x00, sizeof(gszAlertFname1));
             memset(gszAlertFname2, 0x00, sizeof(gszAlertFname2));
-            
+
             sprintf(gszAlertFname1, "%s/%s_%s%s", gszIniParCommon[E_ALERT_LOG_DIR], gszAppName, gszToday, ALERT_SUFF);
-            f = fopen(gszAlertFname1, "a");
-            fprintf(f, "%s (%s hour) %s|%s\n", gszAppName, gszIniParCommon[E_NO_SYN_ALERT_HOUR], getDateTimeT(&gtLastProcTimeT, DTM_DATE_TIME_FULL), getSysDTM(DTM_DATE_TIME_FULL));
-            fclose(f);
+            if ( (f = fopen(gszAlertFname1, "a")) != NULL ) {
+                fprintf(f, "%s (%s hour) %s|%s\n", gszAppName, gszIniParCommon[E_NO_SYN_ALERT_HOUR], getDateTimeT(&gtLastProcTimeT, DTM_DATE_TIME_FULL), getSysDTM(DTM_DATE_TIME_FULL));
+                fclose(f); f = NULL;
+            }
+            else {
+                writeLog(LOG_ERR, "unable to open alert file %s", gszAlertFname1);
+            }
+
 
             sprintf(gszAlertFname2, "%s/%s_%s_%.2s%s", gszIniParCommon[E_ALERT_LOG_DIR], gszAppName, gszToday, getSysDTM(DTM_TIME_FORM), ALERT_SUFF);
-            f = fopen(gszAlertFname2, "a");
-            fprintf(f, "%s\n", gszAlertStr2);
-            fclose(f);
-            
+            if ( (f = fopen(gszAlertFname2, "a")) != NULL ) {
+                fprintf(f, "%s\n", gszAlertStr2);
+                fclose(f); f = NULL;
+            }
+            else {
+                writeLog(LOG_ERR, "unable to open alert file %s", gszAlertFname1);
+            }
+
             writeLog(LOG_INF, "no new file for %s hour, alert file created", gszIniParCommon[E_NO_SYN_ALERT_HOUR]);
 
             gtTimeCap1stSyn = 0L;
@@ -1915,30 +1955,34 @@ writeLog(LOG_DB2, "sys(%ld) 1st(%ld) new(%ld) val(%ld) alrt_sec(%d)", systime, g
 
 int extDecoder(const char *full_fname, char *full_decoded)
 {
-    char cmd[SIZE_BUFF], msg[SIZE_ITEM_S];
+    char cmd[SIZE_BUFF];
     struct stat st;
 
-    strcpy(full_decoded, full_fname);
-    if ( gszIniParOutput[E_DECODER_PRG][0] != '\0' && strcmp(gszIniParOutput[E_DECODER_PRG], "NA") != 0 ) {
-        memset(cmd, 0x00, sizeof(cmd));
-        memset(msg, 0x00, sizeof(msg));
-        
-        sprintf(full_decoded, "%s/%s.decoded", gszIniParCommon[E_TMP_DIR], basename((char *)full_fname));
-        
-        if ( strstr(gszIniParOutput[E_DECODER_PRG], "uncompress") != NULL ||
-             strstr(gszIniParOutput[E_DECODER_PRG], "gunzip") != NULL ) {
-            sprintf(cmd, "%s -c %s > %s 2>/dev/null", gszIniParOutput[E_DECODER_PRG], full_fname, full_decoded);
-        }
-        else {
-            sprintf(cmd, "%s -i %s -o %s -s \"|\"", gszIniParOutput[E_DECODER_PRG], full_fname, full_decoded);
-        }
-        system(cmd);
-        
-        sprintf(msg, "%s", strerror(errno));
-        lstat(full_decoded, &st);
-        if ( access(full_decoded, F_OK|R_OK) != SUCCESS || st.st_size <= 0 ) {
-            writeLog(LOG_SYS, "problem with unzip/decoder: %s", msg);
-            return FAILED;
+    if ( access(full_fname, F_OK|R_OK) != SUCCESS ) {
+        writeLog(LOG_SYS, "unable to access file '%s': %s", full_fname, strerror(errno));
+        return FAILED;
+    }
+    else {
+        strcpy(full_decoded, full_fname);
+        if ( gszIniParOutput[E_DECODER_PRG][0] != '\0' && strcmp(gszIniParOutput[E_DECODER_PRG], "NA") != 0 ) {
+            memset(cmd, 0x00, sizeof(cmd));
+
+            sprintf(full_decoded, "%s/%s.decoded", gszIniParCommon[E_TMP_DIR], basename((char *)full_fname));
+
+            if ( strstr(gszIniParOutput[E_DECODER_PRG], "uncompress") != NULL ||
+                 strstr(gszIniParOutput[E_DECODER_PRG], "unzip") != NULL ) {
+                sprintf(cmd, "%s -c %s > %s 2>/dev/null", gszIniParOutput[E_DECODER_PRG], full_fname, full_decoded);
+            }
+            else {
+                sprintf(cmd, "%s -i %s -o %s -s \"|\"", gszIniParOutput[E_DECODER_PRG], full_fname, full_decoded);
+            }
+            system(cmd);
+
+            lstat(full_decoded, &st);
+            if ( access(full_decoded, F_OK|R_OK) != SUCCESS || st.st_size <= 0 ) {
+                writeLog(LOG_SYS, "problem with unzip/decoder: %s", strerror(errno));
+                return FAILED;
+            }
         }
     }
     return SUCCESS;
@@ -1956,7 +2000,7 @@ void getCksumStr(const char *fname, char *cksum_str, size_t ck_size)
 {
     char cmd[SIZE_BUFF];
     FILE *ifp = NULL;
-    
+
     memset(cmd, 0x00, sizeof(cmd));
     sprintf(cmd, "cksum %s 2>/dev/null | gawk '{ print $1\"|\"$2 }'", fname);
     if ( (ifp = popen(cmd, "r")) == NULL ) {
