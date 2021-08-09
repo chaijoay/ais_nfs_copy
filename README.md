@@ -1,1 +1,2 @@
 # ais_nfs_copy
+This nfs copy is providing a wide variety of copy files from one to one single file or many to one merged file prior to their readiness before copying such as sync file or self readiness (steady modified timestamp). The process is also keeping track of the new file from source directory to be copying to the target directory including ability to backing up or removing files from source directory.
