@@ -10,14 +10,15 @@
 ///
 /// CREATE DATE : 30-Apr-2019
 ///
-/// CURRENT VERSION NO : 1.0
+/// CURRENT VERSION NO : 1.1.2
 ///
-/// LAST RELEASE DATE  : 30-Apr-2019
+/// LAST RELEASE DATE  : 21-Nov-2019
 ///
 /// MODIFICATION HISTORY :
 ///     1.0         30-Apr-2019     First Version
 ///     1.1.0       17-Sep-2019     flushes logState and not backup sync in case of self sync
 ///     1.1.1       19-Sep-2019     add copy mode feature to enable 1 to 1 copying (keep the same name for input and output)
+///     1.1.2       21-Nov-2019     fix state file checking and able to uncompress input file then concat output
 ///
 ///
 
@@ -32,7 +33,7 @@
 #include "nfs_ini_def.h"
 
 #define _APP_NAME_              "nfs_copy"
-#define _APP_VERS_              "1.1.1"
+#define _APP_VERS_              "1.1.2"
 
 #define STATE_SUFF              ".proclist"
 #define ALERT_SUFF              ".alrt"
@@ -92,6 +93,7 @@ void    printUsage();
 int     validateIni();
 int     _ini_callback(const char *section, const char *key, const char *value, void *userdata);
 void    makeIni();
+int     chkStateAndConcat(const char *oFileName);
 void    chkAlertNoSync();
 int     extDecoder(const char *full_fname, char *full_decoded);
 void    chkToDelete(const char *fname_del, const char *fname_ori);

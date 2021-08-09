@@ -10,14 +10,15 @@
 ///
 /// CREATE DATE : 30-Apr-2019
 ///
-/// CURRENT VERSION NO : 1.0
+/// CURRENT VERSION NO : 1.1.2
 ///
-/// LAST RELEASE DATE  : 30-Apr-2019
+/// LAST RELEASE DATE  : 21-Nov-2019
 ///
 /// MODIFICATION HISTORY :
 ///     1.0.0       30-Apr-2019     First Version
 ///     1.1.0       17-Sep-2019     flushes logState and not backup sync in case of self sync
 ///     1.1.1       19-Sep-2019     add copy mode feature to enable 1 to 1 copying (keep the same name for input and output)
+///     1.1.2       21-Nov-2019     fix state file checking and able to uncompress input file then concat output
 ///
 ///
 #define _XOPEN_SOURCE           700         // Required under GLIBC for nftw()
@@ -252,8 +253,8 @@ int main(int argc, char *argv[])
             // 3. verify old/processed sync files to be skipped
             memset(new_snap, 0x00, sizeof(new_snap));
             sprintf(new_snap, "%s/%s.new", gszIniParCommon[E_TMP_DIR], gszAppName);
-            int file_cnt = 0;
-            if ( (file_cnt = chkSnapVsState(first_snap, new_snap)) > 0 ) {
+            int file_cnt = chkSnapVsState(first_snap, new_snap);
+            if ( file_cnt > 0 ) {
 
                 if ( gnCmdArg == E_NEW ) {
                     printf("(new) snapshot file -> %s (%d)\n", new_snap, file_cnt);
@@ -292,6 +293,9 @@ int main(int argc, char *argv[])
                     writeLog(LOG_INF, "no sync file (valid state)");
                     ( gtTimeCapValSyn == 0L ? gtTimeCapValSyn = time(NULL) : gtTimeCapValSyn );
                 }
+            }
+            else if ( file_cnt < 0 ) {
+                break;  // There are some problem in reading state file
             }
             else {
                 writeLog(LOG_INF, "no sync file (new state)");
@@ -475,16 +479,24 @@ int chkSnapVsState(const char *isnap, const char *osnap)
     sprintf(cmd, "touch %s/%s_%s%s", gszIniParCommon[E_STATE_DIR], gszAppName, gszToday, STATE_SUFF);
 writeLog(LOG_DB3, "chkSnapVsState cmd '%s'", cmd);
     system(cmd);
-    // sort all state files (<APP_NAME>_<PROC_TYPE>_<YYYYMMDD>.proclist) to tmp file
-    // state files format is <LEAF>|<SYNC_FILE>
-    sprintf(cmd, "sort -T %s %s/%s_*%s > %s 2>/dev/null", gszIniParCommon[E_TMP_DIR], gszIniParCommon[E_STATE_DIR], gszAppName, STATE_SUFF, tmp);
+
+    if ( chkStateAndConcat(tmp) == SUCCESS ) {
+        // sort all state files (<APP_NAME>_<PROC_TYPE>_<YYYYMMDD>.proclist) to tmp file
+        // state files format is <LEAF>|<SYNC_FILE>
+        //sprintf(cmd, "sort -T %s %s/%s_*%s > %s.tmp 2>/dev/null", gszIniParCommon[E_TMP_DIR], gszIniParCommon[E_STATE_DIR], gszAppName, STATE_SUFF, tmp);
+        sprintf(cmd, "sort -T %s %s > %s.tmp 2>/dev/null", gszIniParCommon[E_TMP_DIR], tmp, tmp);
 writeLog(LOG_DB3, "chkSnapVsState cmd '%s'", cmd);
-    system(cmd);
+        system(cmd);
+    }
+    else {
+        unlink(tmp);
+        return FAILED;
+    }
     // compare tmp file(sorted all state files) with sorted first_snap to get only unprocessed new files list
-    sprintf(cmd, "comm -23 %s %s > %s 2>/dev/null", isnap, tmp, osnap);
+    sprintf(cmd, "comm -23 %s %s.tmp > %s 2>/dev/null", isnap, tmp, osnap);
 writeLog(LOG_DB3, "chkSnapVsState cmd '%s'", cmd);
     system(cmd);
-    sprintf(cmd, "rm -f %s", tmp);
+    sprintf(cmd, "rm -f %s %s.tmp", tmp, tmp);
 writeLog(LOG_DB3, "chkSnapVsState cmd '%s'", cmd);
     system(cmd);
 
@@ -1910,15 +1922,22 @@ int extDecoder(const char *full_fname, char *full_decoded)
     if ( gszIniParOutput[E_DECODER_PRG][0] != '\0' && strcmp(gszIniParOutput[E_DECODER_PRG], "NA") != 0 ) {
         memset(cmd, 0x00, sizeof(cmd));
         memset(msg, 0x00, sizeof(msg));
+        
         sprintf(full_decoded, "%s/%s.decoded", gszIniParCommon[E_TMP_DIR], basename((char *)full_fname));
         
-        sprintf(cmd, "%s -i %s -o %s -s \"|\"", gszIniParOutput[E_DECODER_PRG], full_fname, full_decoded);
+        if ( strstr(gszIniParOutput[E_DECODER_PRG], "uncompress") != NULL ||
+             strstr(gszIniParOutput[E_DECODER_PRG], "gunzip") != NULL ) {
+            sprintf(cmd, "%s -c %s > %s 2>/dev/null", gszIniParOutput[E_DECODER_PRG], full_fname, full_decoded);
+        }
+        else {
+            sprintf(cmd, "%s -i %s -o %s -s \"|\"", gszIniParOutput[E_DECODER_PRG], full_fname, full_decoded);
+        }
         system(cmd);
         
         sprintf(msg, "%s", strerror(errno));
         lstat(full_decoded, &st);
         if ( access(full_decoded, F_OK|R_OK) != SUCCESS || st.st_size <= 0 ) {
-            writeLog(LOG_SYS, "problem with decoder: %s", msg);
+            writeLog(LOG_SYS, "problem with unzip/decoder: %s", msg);
             return FAILED;
         }
     }
@@ -1945,4 +1964,44 @@ void getCksumStr(const char *fname, char *cksum_str, size_t ck_size)
     }
     fgets(cksum_str, ck_size, ifp);
     pclose(ifp);
+}
+
+int chkStateAndConcat(const char *oFileName)
+{
+    int result = FAILED;
+    DIR *p_dir;
+    struct dirent *p_dirent;
+    char cmd[SIZE_BUFF];
+    memset(cmd, 0x00, sizeof(cmd));
+    unlink(oFileName);
+
+    if ( (p_dir = opendir(gszIniParCommon[E_STATE_DIR])) != NULL ) {
+        while ( (p_dirent = readdir(p_dir)) != NULL ) {
+            // state file name: <APP_NAME>_<PROC_TYPE>_YYYYMMDD.proclist
+            if ( strcmp(p_dirent->d_name, ".") == 0 || strcmp(p_dirent->d_name, "..") == 0 )
+                continue;
+
+            if ( strstr(p_dirent->d_name, STATE_SUFF) != NULL &&
+                 strstr(p_dirent->d_name, gszAppName) != NULL ) {
+                char state_file[SIZE_ITEM_L];
+                memset(state_file, 0x00, sizeof(state_file));
+                sprintf(state_file, "%s/%s", gszIniParCommon[E_STATE_DIR], p_dirent->d_name);
+                if ( access(state_file, F_OK|R_OK|W_OK) != SUCCESS ) {
+                    writeLog(LOG_ERR, "unable to read/write file %s", state_file);
+                    result = FAILED;
+                    break;
+                }
+                else {
+                    sprintf(cmd, "cat %s >> %s 2>/dev/null", state_file, oFileName);
+                    system(cmd);
+                    result = SUCCESS;
+                }
+            }
+        }
+        closedir(p_dir);
+        return result;
+    }
+    else {
+        return result;
+    }
 }
