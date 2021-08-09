@@ -59,7 +59,8 @@ typedef enum {
 
 typedef enum {
     // OUTPUT Section
-    E_MRG_OUTPUT = 0,
+    E_COPY_MODE = 0,
+    E_MRG_OUTPUT,
     E_MRG_MAX_SIZE_MB,
     E_FILE_PREFIX,
     E_NW_MAP_FILE,

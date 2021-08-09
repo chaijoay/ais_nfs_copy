@@ -15,7 +15,9 @@
 /// LAST RELEASE DATE  : 30-Apr-2019
 ///
 /// MODIFICATION HISTORY :
-///     1.0     30-Apr-2019     First Version
+///     1.0         30-Apr-2019     First Version
+///     1.1.0       17-Sep-2019     flushes logState and not backup sync in case of self sync
+///     1.1.1       19-Sep-2019     add copy mode feature to enable 1 to 1 copying (keep the same name for input and output)
 ///
 ///
 
@@ -30,7 +32,7 @@
 #include "nfs_ini_def.h"
 
 #define _APP_NAME_              "nfs_copy"
-#define _APP_VERS_              "1.1.0"
+#define _APP_VERS_              "1.1.1"
 
 #define STATE_SUFF              ".proclist"
 #define ALERT_SUFF              ".alrt"
@@ -73,6 +75,7 @@ int     chkSnapVsData_VaryLeaf(FILE *isnap, FILE *osnap);
 int     isSynStable(const char *fname, int stable_sec, char *mod_ymd, unsigned long *fsize);
 int     wrtOutput(const char *snapfile);
 int     relocDataAndGenSync(const char *full_catfile, const char *synfile, char snpInf[][SIZE_ITEM_L], int snpsize);
+int     one2oneCopy(const char *snapfile);
 void    prepLeafDir(const char *orig, char snp[][SIZE_ITEM_L], const char *yyyymmdd, char *out);
 void    doBackup(char snp[][SIZE_ITEM_L]);
 int     mapNetType(char *nettype, char *cdrfeedtype);
@@ -92,6 +95,7 @@ void    makeIni();
 void    chkAlertNoSync();
 int     extDecoder(const char *full_fname, char *full_decoded);
 void    chkToDelete(const char *fname_del, const char *fname_ori);
+void    getCksumStr(const char *fname, char *cksum_str, size_t ck_size);
 
 #ifdef  __cplusplus
     }
